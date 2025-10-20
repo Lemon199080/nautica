@@ -1033,6 +1033,29 @@ var worker_default = {
       const url = new URL(request.url);
       APP_DOMAIN = url.hostname;
       serviceName = APP_DOMAIN.split(".")[0];
+      if (url.pathname === "/usage") {
+const limitRequests = Number(urlParam(request, "limitRequests", 100000));
+const limitObs      = Number(urlParam(request, "limitObs", 200000));
+const limitBuild    = Number(urlParam(request, "limitBuild", 3000));
+  
+  const [requestsToday, obsToday, buildMinutes] = await Promise.all([
+    fetchRequestsToday().catch(() => 0),  // Hapus parameter env
+    Number(urlParam(request, "obs", 0)),
+    Number(urlParam(request, "build", 0)),
+  ]);
+  
+  const data = [
+    row("Requests today", requestsToday, limitRequests),
+    row("Observability events today", obsToday, limitObs),
+    row("Workers build minutes this month", buildMinutes, limitBuild),
+  ];
+  
+  const wantsJson = request.headers.get("accept")?.includes("application/json") || urlParam(request, "format") === "json";
+  if (wantsJson) {
+    return json(data);
+  }
+  return textTable(data);
+}
       const upgradeHeader = request.headers.get("Upgrade");
       if (upgradeHeader === "websocket") {
          // Pattern 1: Custom path dengan proxy - /JETZZZZZ/ip:port atau /JETZZZZZ/ip-port
@@ -1698,6 +1721,87 @@ function getFlagEmoji(isoCode) {
   const codePoints = isoCode.toUpperCase().split("").map((char) => 127397 + char.charCodeAt(0));
   return String.fromCodePoint(...codePoints);
 }
+
+// Usage Checker Functions
+function urlParam(request, key, fallback) {
+  const v = new URL(request.url).searchParams.get(key);
+  return v ?? fallback;
+}
+
+function row(feature, usage, limit) {
+  const pct = limit ? ((usage / limit) * 100) : 0;
+  const status = !limit ? "–" : usage > limit ? "🛑" : usage > limit * 0.9 ? "⚠️" : "✅";
+  return { feature, usage, limit, usedPercent: Number(pct.toFixed(1)), status };
+}
+
+function json(data) {
+  return new Response(JSON.stringify({ data }, null, 2), {
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function textTable(data) {
+  const lines = [
+    "Feature\tUsage\tLimit\tUsed %\tStatus",
+    ...data.map(d => [
+      d.feature,
+      d.usage.toLocaleString("en-US"),
+      d.limit.toLocaleString("en-US"),
+      `${d.usedPercent}%`,
+      d.status,
+    ].join("\t")),
+  ];
+  return new Response(lines.join("\n"), {
+    headers: { "content-type": "text/plain; charset=utf-8" },
+  });
+}
+
+async function fetchRequestsToday() {
+  // Hardcode credentials di sini
+  const CF_API_TOKEN = "api token "; // template read analytics
+  const CF_ACCOUNT_ID = "id aaccount";
+  
+  const { start, end } = todayUTC();
+  const query = `
+    query GetWorkersRequests($accountTag: string, $start: string, $end: string) {
+      viewer {
+        accounts(filter: { accountTag: $accountTag }) {
+          workersInvocationsAdaptive(
+            limit: 9999,
+            filter: { datetime_geq: $start, datetime_leq: $end }
+          ) {
+            sum { requests }
+          }
+        }
+      }
+    }`;
+  const res = await fetch("https://api.cloudflare.com/client/v4/graphql", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${CF_API_TOKEN}`,
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+    },
+    body: JSON.stringify({
+      query,
+      variables: {
+        accountTag: CF_ACCOUNT_ID,
+        start, end
+      },
+    }),
+  });
+  const j = await res.json();
+  const rows = j?.data?.viewer?.accounts?.[0]?.workersInvocationsAdaptive ?? [];
+  return rows.reduce((sum, r) => sum + (r?.sum?.requests ?? 0), 0);
+}
+
+function todayUTC() {
+  const now = new Date();
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0));
+  const end   = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59, 999));
+  return { start: start.toISOString(), end: end.toISOString() };
+}
+
 __name(getFlagEmoji, "getFlagEmoji");
 export {
   worker_default as default
